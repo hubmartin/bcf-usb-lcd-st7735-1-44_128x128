@@ -1,0 +1,21 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "/home/hub/Desktop/Bigclown/temp/Adafruit-ST7735-Library"
+		},
+		{
+			"path": "/home/hub/Desktop/Bigclown/temp/Uncanny_Eyes"
+		}
+	],
+	"settings": {
+		"terminal.integrated.shell.windows": "C:\\Windows\\sysnative\\cmd.exe",
+		"workbench.colorCustomizations": {
+			"activityBar.background": "#062C61",
+			"titleBar.activeBackground": "#093E88",
+			"titleBar.activeForeground": "#F7FAFE"
+		}
+	}
+}
