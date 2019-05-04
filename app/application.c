@@ -1,4 +1,29 @@
+//--------------------------------------------------------------------------
+// Uncanny eyes for Adafruit 1.5" OLED (product #1431) or 1.44" TFT LCD
+// (#2088).  Works on PJRC Teensy 3.x and on Adafruit M0 and M4 boards
+// (Feather, Metro, etc.).  This code uses features specific to these
+// boards and WILL NOT work on normal Arduino or other boards!
+//
+// SEE FILE "config.h" FOR MOST CONFIGURATION (graphics, pins, display type,
+// etc).  Probably won't need to edit THIS file unless you're doing some
+// extremely custom modifications.
+//
+// Adafruit invests time and resources providing this open source code,
+// please support Adafruit and open-source hardware by purchasing products
+// from Adafruit!
+//
+// Written by Phil Burgess / Paint Your Dragon for Adafruit Industries.
+// MIT license.  SPI FIFO insight from Paul Stoffregen's ILI9341_t3 library.
+// Inspired by David Boccabella's (Marcwolf) hybrid servo/OLED eye concept.
+//--------------------------------------------------------------------------
+
+
 #include <application.h>
+
+
+#define SYMMETRICAL_EYELID
+#include "hubEye.h"
+//#include "defaultEye.h"
 
 
 // LED instance
@@ -9,11 +34,16 @@ bc_button_t button;
 
 bc_gfx_t gfx;
 
+bc_lis2dh12_t a;
+bc_lis2dh12_result_g_t a_result;
+
+
+bc_opt3001_t lux;
+float illuminance;
+
 extern const bc_image_t eye;
 
-
 /*
-
 DC
 Command = 0
 Data = 1
@@ -27,6 +57,17 @@ void display_init(const uint8_t *addr);
 void lcd_send_command(uint8_t command);
 void lcd_send_command_data(uint8_t command, const uint8_t *data, size_t data_length);
 void lcd_set_pixel(uint8_t x, uint8_t y, uint16_t color);
+
+
+bc_lis2dh12_t a;
+
+void drawEye( // Renders one eye.  Inputs must be pre-clipped & valid.
+  uint8_t  e,       // Eye array index; 0 or 1 for left/right
+  uint16_t iScale,  // Scale factor for iris (0-1023)
+  uint8_t  scleraX, // First pixel X offset into sclera image
+  uint8_t  scleraY, // First pixel Y offset into sclera image
+  uint8_t  uT,      // Upper eyelid threshold value
+  uint8_t  lT);
 
 #define LCD_COLSTART 2
 #define LCD_ROWSTART 3
@@ -325,7 +366,7 @@ void lcd_clear(uint16_t color)
     lcd_send_color(color, 128*128);
 }
 
-static bc_dma_channel_config_t _bc_spi_dma_config =
+bc_dma_channel_config_t _bc_spi_dma_config =
 {
     .request = BC_DMA_REQUEST_2,
     .direction = BC_DMA_DIRECTION_TO_PERIPHERAL,
@@ -335,6 +376,27 @@ static bc_dma_channel_config_t _bc_spi_dma_config =
     .address_peripheral = (void *)&SPI2->DR,
     .priority = BC_DMA_PRIORITY_HIGH
 };
+
+void lcd_send_dma(uint8_t *data, size_t data_size)
+{
+
+    // Enable TX DMA request
+    SPI2->CR2 |= SPI_CR2_TXDMAEN;
+
+    // Setup DMA channel
+    _bc_spi_dma_config.address_memory = (void *)data;
+    _bc_spi_dma_config.length = data_size;
+    bc_dma_channel_config(BC_DMA_CHANNEL_5, &_bc_spi_dma_config);
+    bc_dma_channel_run(BC_DMA_CHANNEL_5);
+}
+
+void lcd_send_dma_wait()
+{
+    while(DMA1_Channel5->CCR & DMA_CCR_EN) {}
+
+    // Disable TX DMA request
+    SPI2->CR2 &= ~SPI_CR2_TXDMAEN;
+}
 
 void lcd_draw_image(int x, int y, const bc_image_t *img)
 {
@@ -455,7 +517,9 @@ void lcd_init()
 {
     bc_system_pll_enable();
 
-    bc_spi_init(BC_SPI_SPEED_16_MHZ, BC_SPI_MODE_0);
+    bc_spi_init(BC_SPI_SPEED_4_MHZ, BC_SPI_MODE_0);
+    //bc_spi_init(BC_SPI_SPEED_16_MHZ, BC_SPI_MODE_0);
+
 
     bc_gpio_set_mode(LCD_DC, BC_GPIO_MODE_OUTPUT);
     // Data mode
@@ -470,6 +534,43 @@ void lcd_init()
     display_init(Rcmd1);
     display_init(Rcmd2green144);
     display_init(Rcmd3);
+
+}
+
+float map_f(float x, float in_min, float in_max, float out_min, float out_max)
+{
+    int32_t val = (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+
+    if (val > out_max)
+    {
+        val = out_max;
+    }
+    if (val < out_min)
+    {
+        val = out_min;
+    }
+
+    return val;
+}
+
+void lis2_event_handler(bc_lis2dh12_t *self, bc_lis2dh12_event_t event, void *event_param)
+{
+    (void) self;
+    (void) event_param;
+
+    if (event == BC_LIS2DH12_EVENT_UPDATE) {
+        bc_lis2dh12_get_result_g(&a, &a_result);
+    }
+}
+
+void lux_meter_event_handler(bc_tag_lux_meter_t *self, bc_tag_lux_meter_event_t event, void *event_param)
+{
+    (void) event_param;
+
+    if (event == BC_TAG_LUX_METER_EVENT_UPDATE)
+    {
+        bc_tag_lux_meter_get_illuminance_lux(self, &illuminance);
+    }
 }
 
 void application_init(void)
@@ -498,7 +599,7 @@ void application_init(void)
     }*/
 
     bc_gfx_init(&gfx, NULL, lcd_get_driver());
-
+/*
     lcd_draw_image(0 ,0 , &eye);
 
     bc_gfx_draw_pixel(&gfx, 0,0, ST77XX_RED);
@@ -509,13 +610,22 @@ void application_init(void)
     bc_gfx_draw_string(&gfx, 5, 5, "BigClown", ST77XX_RED);
     bc_gfx_draw_string(&gfx, 5, 20, "ST7735 LCD Driver", ST77XX_GREEN);
     bc_gfx_draw_string(&gfx, 5, 35, "128x128 px RGB", ST77XX_BLUE);
+*/
+    bc_lis2dh12_init(&a, BC_I2C_I2C0, 0x19);
+    bc_lis2dh12_set_event_handler(&a, lis2_event_handler, NULL);
+    bc_lis2dh12_set_update_interval(&a, 50);
+
+    bc_tag_lux_meter_init(&lux, BC_I2C_I2C0, BC_TAG_LUX_METER_I2C_ADDRESS_DEFAULT);
+    bc_tag_lux_meter_set_event_handler(&lux, lux_meter_event_handler, NULL);
+    bc_tag_lux_meter_set_update_interval(&lux, 200);
+
 
 }
 
 void application_task(void)
 {
 
-
+/*
     static uint8_t x = 0;
 
     static uint16_t color = ST77XX_RED;
@@ -537,8 +647,149 @@ void application_task(void)
 
     bc_gfx_printf(&gfx, x, 60, color, "%d", x);
 
-    x++;
+    x++;*/
+
+    uint8_t scleraX = map_f(a_result.x_axis, -0.5f, +0.5f, 0, 65);
+    uint8_t scleraY = map_f(a_result.y_axis, -0.5f, +0.5f, 0, 65);
+
+    uint8_t irisScale = map_f(illuminance, 10000, 0, 0, 255);
+
+    drawEye(0, irisScale, scleraX, scleraY, 100, 100);
 
     // Plan next run this function after 1000 ms
     bc_scheduler_plan_current_from_now(10);
+}
+
+
+uint16_t byteTo565(uint8_t color)
+{
+    return  (color & 0xE0) << 8 |
+            (color & 0x1C) << 6 |
+            (color & 0x03) << 3;
+}
+
+
+void drawEye( // Renders one eye.  Inputs must be pre-clipped & valid.
+  uint8_t  e,       // Eye array index; 0 or 1 for left/right
+  uint16_t iScale,  // Scale factor for iris (0-1023)
+  uint8_t  scleraX, // First pixel X offset into sclera image
+  uint8_t  scleraY, // First pixel Y offset into sclera image
+  uint8_t  uT,      // Upper eyelid threshold value
+  uint8_t  lT) {    // Lower eyelid threshold value
+
+  uint8_t  screenX, screenY, scleraXsave;
+  int16_t  irisX, irisY;
+  uint16_t p, a;
+  uint32_t d;
+
+  static uint16_t lineBuffer[SCREEN_WIDTH];
+
+#if defined(SYNCPIN) && (SYNCPIN >= 0)
+  if(receiver) {
+    // Overwrite arguments with values in syncStruct.  Disable interrupts
+    // briefly so new data can't overwrite the struct in mid-parse.
+    noInterrupts();
+    iScale  = syncStruct.iScale;
+    // Screen is mirrored, this 'de-mirrors' the eye X direction
+    scleraX = SCLERA_WIDTH - 1 - SCREEN_WIDTH - syncStruct.scleraX;
+    scleraY = syncStruct.scleraY;
+    uT      = syncStruct.uT;
+    lT      = syncStruct.lT;
+    interrupts();
+  } else {
+    // Stuff arguments into syncStruct and send to receiver
+    syncStruct.iScale  = iScale;
+    syncStruct.scleraX = scleraX;
+    syncStruct.scleraY = scleraY;
+    syncStruct.uT      = uT;
+    syncStruct.lT      = lT;
+    Wire.beginTransmission(SYNCADDR);
+    Wire.write((char *)&syncStruct, sizeof syncStruct);
+    Wire.endTransmission();
+  }
+#endif
+
+  uint8_t  irisThreshold = (128 * (1023 - iScale) + 512) / 1024;
+  uint32_t irisScale     = IRIS_MAP_HEIGHT * 65536 / irisThreshold;
+
+  // Set up raw pixel dump to entire screen.  Although such writes can wrap
+  // around automatically from end of rect back to beginning, the region is
+  // reset on each frame here in case of an SPI glitch.
+  /*
+  TFT_SPI.beginTransaction(settings);
+  digitalWrite(eyeInfo[e].select, LOW);                        // Chip select
+#if defined(_ADAFRUIT_ST7735H_) || defined(_ADAFRUIT_ST77XXH_) // TFT
+  eye[e].display->setAddrWindow(0, 0, 128, 128);
+#else // OLED
+  eye[e].display->writeCommand(SSD1351_CMD_SETROW);    // Y range
+  eye[e].display->spiWrite(0); eye[e].display->spiWrite(SCREEN_HEIGHT - 1);
+  eye[e].display->writeCommand(SSD1351_CMD_SETCOLUMN); // X range
+  eye[e].display->spiWrite(0); eye[e].display->spiWrite(SCREEN_WIDTH  - 1);
+  eye[e].display->writeCommand(SSD1351_CMD_WRITERAM);  // Begin write
+#endif
+  digitalWrite(eyeInfo[e].select, LOW);                // Re-chip-select
+  digitalWrite(DISPLAY_DC, HIGH);                      // Data mode
+  */
+  // Now just issue raw 16-bit values for every pixel...
+
+  lcd_set_addr_window(0, 0, 128-1, 128-1);
+
+    // Ram write
+    lcd_send_command(ST77XX_RAMWR);
+
+    // Set CS to active level
+    GPIOB->BSRR = GPIO_BSRR_BR_12;
+
+  scleraXsave = scleraX; // Save initial X value to reset on each line
+  irisY       = scleraY - (SCLERA_HEIGHT - IRIS_HEIGHT) / 2;
+  for(screenY=0; screenY<SCREEN_HEIGHT; screenY++, scleraY++, irisY++) {
+
+    uint16_t *ptr = lineBuffer;
+
+    scleraX = scleraXsave;
+    irisX   = scleraXsave - (SCLERA_WIDTH - IRIS_WIDTH) / 2;
+    for(screenX=0; screenX<SCREEN_WIDTH; screenX++, scleraX++, irisX++) {
+      if((lower[screenY][screenX] <= lT) ||
+         (upper[screenY][screenX] <= uT)) {             // Covered by eyelid
+        p = 0;
+      } else if((irisY < 0) || (irisY >= IRIS_HEIGHT) ||
+                (irisX < 0) || (irisX >= IRIS_WIDTH)) { // In sclera
+        p = byteTo565(sclera[scleraY][scleraX]);
+      } else {                                          // Maybe iris...
+        p = polar[irisY][irisX];                        // Polar angle/dist
+        d = p & 0x7F;                                   // Distance from edge (0-127)
+        if(d < irisThreshold) {                         // Within scaled iris area
+          d = d * irisScale / 65536;                    // d scaled to iris image height
+          a = (IRIS_MAP_WIDTH * (p >> 7)) / 512;        // Angle (X)
+          p = byteTo565(iris[d][a]);                               // Pixel = iris
+        } else {                                        // Not in iris
+          p = byteTo565(sclera[scleraY][scleraX]);                 // Pixel = sclera
+        }
+      }
+
+      *ptr++ = __builtin_bswap16(p); // DMA: store in scanline buffer
+
+        lcd_send_color(p, 1);
+    } // end column
+
+    // Wait if previous transfer is running
+    /*while (bc_dma_channel_get_length(BC_DMA_CHANNEL_5) != 0)
+    {
+    }*/
+
+    //lcd_send_dma_wait();
+
+    //lcd_send_dma((uint8_t*)lineBuffer, sizeof(lineBuffer));
+  } // end scanline
+
+    // Wait if previous transfer is running
+    /*while (bc_dma_channel_get_length(BC_DMA_CHANNEL_5) != 0)
+    {
+    }*/
+
+
+    //lcd_send_dma_wait();
+
+    // Set CS to inactive level
+    GPIOB->BSRR = GPIO_BSRR_BS_12;
 }
