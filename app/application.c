@@ -17,14 +17,10 @@
 // Inspired by David Boccabella's (Marcwolf) hybrid servo/OLED eye concept.
 //--------------------------------------------------------------------------
 
-
 #include <application.h>
-
-
 #define SYMMETRICAL_EYELID
 #include "hubEye.h"
 //#include "defaultEye.h"
-
 
 // LED instance
 bc_led_t led;
@@ -37,11 +33,18 @@ bc_gfx_t gfx;
 bc_lis2dh12_t a;
 bc_lis2dh12_result_g_t a_result;
 
-
 bc_opt3001_t lux;
 float illuminance;
 
 extern const bc_image_t eye;
+
+#define SENSOR_DATA_STREAM_SAMPLES 6
+
+BC_DATA_STREAM_FLOAT_BUFFER(stream_buffer_acc_x, SENSOR_DATA_STREAM_SAMPLES)
+bc_data_stream_t stream_acc_x;
+
+BC_DATA_STREAM_FLOAT_BUFFER(stream_buffer_acc_y, SENSOR_DATA_STREAM_SAMPLES)
+bc_data_stream_t stream_acc_y;
 
 /*
 DC
@@ -57,7 +60,6 @@ void display_init(const uint8_t *addr);
 void lcd_send_command(uint8_t command);
 void lcd_send_command_data(uint8_t command, const uint8_t *data, size_t data_length);
 void lcd_set_pixel(uint8_t x, uint8_t y, uint16_t color);
-
 
 bc_lis2dh12_t a;
 
@@ -306,6 +308,16 @@ void lcd_send_data(const uint8_t *data, size_t data_length)
         data_length--;
     }
 
+    while ((SPI2->SR & SPI_SR_BSY) == 1)
+    {
+        continue;
+    }
+/*
+    bc_timer_init();
+    bc_timer_start();
+    bc_timer_delay(10);
+    bc_timer_stop();*/
+
     // Set CS to inactive level
     GPIOB->BSRR = GPIO_BSRR_BS_12;
 }
@@ -380,8 +392,17 @@ bc_dma_channel_config_t _bc_spi_dma_config =
 void lcd_send_dma(uint8_t *data, size_t data_size)
 {
 
+    // Disable SPI2
+    SPI2->CR1 &= ~SPI_CR1_SPE;
+
     // Enable TX DMA request
     SPI2->CR2 |= SPI_CR2_TXDMAEN;
+
+    // Enable SPI2
+    SPI2->CR1 |= SPI_CR1_SPE;
+
+    // Set CS to active level
+    GPIOB->BSRR = GPIO_BSRR_BR_12;
 
     // Setup DMA channel
     _bc_spi_dma_config.address_memory = (void *)data;
@@ -394,8 +415,17 @@ void lcd_send_dma_wait()
 {
     while(DMA1_Channel5->CCR & DMA_CCR_EN) {}
 
+    // Set CS to inactive level
+    GPIOB->BSRR = GPIO_BSRR_BS_12;
+
+    // Disable SPI2
+    SPI2->CR1 &= ~SPI_CR1_SPE;
+
     // Disable TX DMA request
     SPI2->CR2 &= ~SPI_CR2_TXDMAEN;
+
+    // Enable SPI2
+    SPI2->CR1 |= SPI_CR1_SPE;
 }
 
 void lcd_draw_image(int x, int y, const bc_image_t *img)
@@ -517,9 +547,12 @@ void lcd_init()
 {
     bc_system_pll_enable();
 
-    bc_spi_init(BC_SPI_SPEED_4_MHZ, BC_SPI_MODE_0);
-    //bc_spi_init(BC_SPI_SPEED_16_MHZ, BC_SPI_MODE_0);
+    //bc_spi_init(BC_SPI_SPEED_4_MHZ, BC_SPI_MODE_0);
+    bc_spi_init(BC_SPI_SPEED_16_MHZ, BC_SPI_MODE_0);
 
+    // Debug GPIO
+    bc_gpio_init(BC_GPIO_P8);
+    bc_gpio_set_mode(BC_GPIO_P8, BC_GPIO_MODE_OUTPUT);
 
     bc_gpio_set_mode(LCD_DC, BC_GPIO_MODE_OUTPUT);
     // Data mode
@@ -560,6 +593,17 @@ void lis2_event_handler(bc_lis2dh12_t *self, bc_lis2dh12_event_t event, void *ev
 
     if (event == BC_LIS2DH12_EVENT_UPDATE) {
         bc_lis2dh12_get_result_g(&a, &a_result);
+
+        if (bc_lis2dh12_get_result_g(&a, &a_result))
+        {
+            bc_data_stream_feed(&stream_acc_x, &a_result.x_axis);
+            bc_data_stream_feed(&stream_acc_y, &a_result.y_axis);
+        }
+        else
+        {
+            bc_data_stream_reset(&stream_acc_x);
+            bc_data_stream_reset(&stream_acc_y);
+        }
     }
 }
 
@@ -619,40 +663,24 @@ void application_init(void)
     bc_tag_lux_meter_set_event_handler(&lux, lux_meter_event_handler, NULL);
     bc_tag_lux_meter_set_update_interval(&lux, 200);
 
+    bc_data_stream_init(&stream_acc_x, 1, &stream_buffer_acc_x);
+    bc_data_stream_init(&stream_acc_y, 1, &stream_buffer_acc_y);
+
 
 }
 
 void application_task(void)
 {
 
-/*
-    static uint8_t x = 0;
+    bc_lis2dh12_result_g_t acc_avg;
 
-    static uint16_t color = ST77XX_RED;
+    bc_data_stream_get_average(&stream_acc_x, &acc_avg.x_axis);
+    bc_data_stream_get_average(&stream_acc_y, &acc_avg.y_axis);
 
-    if(x >= 128)
-    {
-        x = 0;
-        if (color == ST77XX_RED)
-        {
-            color = ST77XX_GREEN;
-        }
-        else
-        {
-            color = ST77XX_RED;
-        }
-    }
+    uint8_t scleraX = map_f(acc_avg.x_axis, -0.5f, +0.5f, 0, 65);
+    uint8_t scleraY = map_f(acc_avg.y_axis, -0.5f, +0.5f, 0, 65);
 
-    lcd_draw_image(0 ,0 , &eye);
-
-    bc_gfx_printf(&gfx, x, 60, color, "%d", x);
-
-    x++;*/
-
-    uint8_t scleraX = map_f(a_result.x_axis, -0.5f, +0.5f, 0, 65);
-    uint8_t scleraY = map_f(a_result.y_axis, -0.5f, +0.5f, 0, 65);
-
-    uint8_t irisScale = map_f(illuminance, 10000, 0, 0, 255);
+    uint8_t irisScale = map_f(illuminance, 15000, 0, 2, 255);
 
     drawEye(0, irisScale, scleraX, scleraY, 100, 100);
 
@@ -661,7 +689,7 @@ void application_task(void)
 }
 
 
-uint16_t byteTo565(uint8_t color)
+inline uint16_t byteTo565(uint8_t color)
 {
     return  (color & 0xE0) << 8 |
             (color & 0x1C) << 6 |
@@ -738,11 +766,16 @@ void drawEye( // Renders one eye.  Inputs must be pre-clipped & valid.
     lcd_send_command(ST77XX_RAMWR);
 
     // Set CS to active level
-    GPIOB->BSRR = GPIO_BSRR_BR_12;
+    //GPIOB->BSRR = GPIO_BSRR_BR_12;
+
+
 
   scleraXsave = scleraX; // Save initial X value to reset on each line
   irisY       = scleraY - (SCLERA_HEIGHT - IRIS_HEIGHT) / 2;
   for(screenY=0; screenY<SCREEN_HEIGHT; screenY++, scleraY++, irisY++) {
+
+      // Debug pin
+    bc_gpio_set_output(BC_GPIO_P8, 1);
 
     uint16_t *ptr = lineBuffer;
 
@@ -769,27 +802,18 @@ void drawEye( // Renders one eye.  Inputs must be pre-clipped & valid.
 
       *ptr++ = __builtin_bswap16(p); // DMA: store in scanline buffer
 
-        lcd_send_color(p, 1);
+       // lcd_send_color(p, 1);
     } // end column
 
-    // Wait if previous transfer is running
-    /*while (bc_dma_channel_get_length(BC_DMA_CHANNEL_5) != 0)
-    {
-    }*/
+    bc_gpio_set_output(BC_GPIO_P8, 0);
 
-    //lcd_send_dma_wait();
+    lcd_send_dma_wait();
 
-    //lcd_send_dma((uint8_t*)lineBuffer, sizeof(lineBuffer));
+    lcd_send_dma((uint8_t*)lineBuffer, sizeof(lineBuffer));
   } // end scanline
 
-    // Wait if previous transfer is running
-    /*while (bc_dma_channel_get_length(BC_DMA_CHANNEL_5) != 0)
-    {
-    }*/
 
 
-    //lcd_send_dma_wait();
+    lcd_send_dma_wait();
 
-    // Set CS to inactive level
-    GPIOB->BSRR = GPIO_BSRR_BS_12;
 }
