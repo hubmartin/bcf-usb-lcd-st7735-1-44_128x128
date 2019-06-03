@@ -65,6 +65,7 @@ to convert it back to 16bit depth.
 #include <application.h>
 #define SYMMETRICAL_EYELID
 #include "hubEye.h"
+#include "smooth.h"
 //#include "defaultEye.h"
 
 // LED instance
@@ -80,6 +81,24 @@ bc_lis2dh12_result_g_t a_result;
 
 bc_opt3001_t lux;
 float illuminance;
+
+uint32_t atci_eye_x;
+uint32_t atci_eye_y;
+
+uint32_t atci_eye_iris;
+
+uint32_t atci_eye_lid_top;
+uint32_t atci_eye_lid_bottom;
+
+smooth_t sm_eye_x;
+smooth_t sm_eye_y;
+
+smooth_t sm_eye_iris;
+
+smooth_t sm_eye_lid_top;
+smooth_t sm_eye_lid_bottom;
+
+
 
 //extern const bc_image_t eye;
 
@@ -718,6 +737,57 @@ void lux_meter_event_handler(bc_tag_lux_meter_t *self, bc_tag_lux_meter_event_t 
     }
 }
 
+bool at_eye_set(bc_atci_param_t *param)
+{
+    if (param->length < 1)
+    {
+        return false;
+    }
+
+    char *comma;
+
+    atci_eye_x = atoi(param->txt);
+
+    comma = strstr(param->txt, ",");
+    if(!comma)
+    {
+        bc_atci_printf("ERR commaY");
+        return false;
+    }
+    atci_eye_y = atoi((comma+1));
+
+    comma = strstr(comma + 1, ",");
+    if(!comma)
+    {
+        bc_atci_printf("ERR iris");
+        return false;
+    }
+    atci_eye_iris = atoi((comma+1));
+
+    comma = strstr(comma + 1, ",");
+    if(!comma)
+    {
+        bc_atci_printf("ERR lidT");
+        return false;
+    }
+    atci_eye_lid_top = atoi((comma+1));
+
+    comma = strstr(comma + 1, ",");
+    if(!comma)
+    {
+        bc_atci_printf("ERR lidB");
+        return false;
+    }
+    atci_eye_lid_bottom = atoi((comma+1));
+
+    smooth_start(&sm_eye_x, atci_eye_x);
+    smooth_start(&sm_eye_y, atci_eye_y);
+
+    smooth_start(&sm_eye_iris, atci_eye_iris);
+
+    return true;
+}
+
 void application_init(void)
 {
     // Initialize logging
@@ -766,7 +836,28 @@ void application_init(void)
 
     bc_data_stream_init(&stream_acc_x, 1, &stream_buffer_acc_x);
     bc_data_stream_init(&stream_acc_y, 1, &stream_buffer_acc_y);
+    
 
+    // Initialize AT command interface
+    static const bc_atci_command_t commands[] = {
+            BC_ATCI_COMMAND_CLAC,
+            BC_ATCI_COMMAND_HELP,
+            {"$EYE", NULL, at_eye_set, NULL, NULL, ""}
+    };
+    bc_atci_init(commands, BC_ATCI_COMMANDS_LENGTH(commands));
+
+    smooth_init(&sm_eye_x, 50);
+    smooth_init(&sm_eye_y, 50);
+    sm_eye_x.max_duration = 350;
+    sm_eye_y.max_duration = 350;
+
+    smooth_init(&sm_eye_iris, 150);
+    sm_eye_iris.max_duration = 1500;
+
+    smooth_init(&sm_eye_lid_top, 70);
+    smooth_init(&sm_eye_lid_bottom, 200);
+    sm_eye_lid_top.max_duration = 550;
+    sm_eye_lid_bottom.max_duration = 550;
 
 }
 
@@ -782,7 +873,18 @@ void manual_eye_control()
 
     uint8_t irisScale = map_f(illuminance, 15000, 0, 2, 255);
 
-    drawEye(0, irisScale, scleraX, scleraY, 100, 100);
+    //atci_eye_lid_top = 100;
+    //atci_eye_lid_bottom = 100;
+
+    scleraX = smooth_get(&sm_eye_x);
+    scleraY = smooth_get(&sm_eye_y);
+
+    irisScale = smooth_get(&sm_eye_iris);
+
+    atci_eye_lid_top = smooth_get(&sm_eye_lid_top);
+    atci_eye_lid_bottom = smooth_get(&sm_eye_lid_bottom);
+
+    drawEye(0, irisScale, scleraX, scleraY, atci_eye_lid_top, atci_eye_lid_bottom);
 }
 
 void application_task(void)
@@ -796,7 +898,7 @@ void application_task(void)
 }
 
 
-inline uint16_t byteTo565(uint8_t color)
+uint16_t byteTo565(uint8_t color)
 {
     return  (color & 0xE0) << 8 |
             (color & 0x1C) << 6 |
